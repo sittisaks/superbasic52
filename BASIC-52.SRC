@@ -30,6 +30,18 @@
 ;  by the ROM code.                       
 ;
 ;*****************************************************************************
+; Modify to run on C8051F380 By Sittisak Sakamornlertsakul
+;*****************************************************************************
+;09/10/2014 version 0.1
+;- Fixed buadrate to 115200
+;- Fixed RAM Size to 4096 due to C8051F381 have wrap around RAM. 
+;  Will be changed in the future when using C8051F380 that can have external RAM.
+;- Replace using P2 with EMI0CN when access XRAM.
+;- Replace XTALV with 48MHz which will be used to calculate Timing delay and interrupt.
+;- Replace TTIME with .005/48/32. 
+;  This value will be used to calculate 5ms real time clock interruption by multiply with XTALV.
+;- Comment out PROM and IPROM for now. It will be replaced by FLASH ROM in the future.
+;*****************************************************************************
 ;
 $NOMOD51
 $include (C8051F380.INC)               ; Include register definition file.
@@ -332,7 +344,15 @@ TVL	EQU	49H
 SAVE_T	EQU	4AH
 SP_H	EQU	4BH		;SERIAL PORT TIME OUT
 SP_L	EQU	4CH
+
+;ORIGINALLY, FROM 4DH THRU 0FFH 
+;WILL BE USED FOR STACK SPACE AND USER WORKING SPACE
+;I ADD SOME VARS TO HELP PORTING OF C8051F380.
+;CMNDSP ADDRESS WILL BE MOVED ACCORDINGLY
+
+;CMNDSP	EQU	4DH		;SYSTEM STACK POINTER
 CMNDSP	EQU	4DH		;SYSTEM STACK POINTER
+
 RCAPH2  EQU     0CBH
 RCAPL2  EQU     0CAH
 IRAMTOP EQU     0FFH            ;TOP OF RAM
@@ -1000,8 +1020,12 @@ CRST:	; This performs system initialzation, it was moved here so the
 	;
 	; First, initialize SFR's
 	;
+  ANL   PCA0MD, #NOT(040h)   ; Clear Watchdog Enable bit
+	LCALL	FRSTINIT             ; Call Initialize specific to C8051F380
+	MOV     SFRPAGE,#LEGACY_PAGE
 	MOV	SCON,#5AH	;INITIALIZE SFR'S
-	MOV	TMOD,#10H
+;TMOD Get overrided in Timer_Init
+;	MOV	TMOD,#10H								
 	MOV	TCON,#54H
         MOV     T2CON,#34H
 ;       DB      75H             ;MOV DIRECT, # OP CODE
@@ -1054,16 +1078,31 @@ CRS1:   CJNE    R7,#3,CR0
 CRS2:   ACALL   CL_1
         SJMP    CR1
 	;
-CR0:	MOV	R3,DPH		;SAVE THE DPTR
-        MOV     R1,DPL
-	INC	DPTR
-	MOV	A,#5AH
-	MOVX	@DPTR,A
-	MOVX	A,@DPTR
-	CJNE	A,#5AH,CR1
-	CLR	A
-	MOVX	@DPTR,A
-	CJNE	R3,#0E0H,CR0
+CR0:	
+;Can not find ram size with C8051F381
+;  MOV	R3,DPH		;SAVE THE DPTR
+;  MOV     R1,DPL
+;	INC	DPTR
+;	MOV	A,#5AH
+;	MOVX	@DPTR,A
+;	MOVX	A,@DPTR
+;	CJNE	A,#5AH,CR1
+;	CLR	A
+;	MOVX	@DPTR,A
+;	CJNE	R3,#0E0H,CR0
+;For C8051F381 RAM addressing will wrap around
+;and can not have external ram.
+;Set to fix size of 03FFH and clear it before use.
+;Will revisit again when using C8051F380 that can have external ram
+	MOV		DPTR,#0H
+CR0_1:
+	CLR	A				;CLEAR THE MEMORY
+	MOVX	@DPTR,A		;CLEAR THE RAM
+  	INC		DPTR
+	MOV		A,#4
+	CJNE	A,DPH,CR0_1
+	MOV		R3,#0FH		;Fix RAM size to 4096 bytes
+	MOV		R1,#0FFH
 	;
 CR1:    CJNE    R3,#03H,CR11    ;NEED THIS MUCH RAM
 CR11:   JC      CRST
@@ -1077,7 +1116,11 @@ CR2:	ACALL	RC1		;SET UP STACKS IF NOT DONE
 	MOV	A,MT1		;GET THE RESET BYTE
         CJNE    A,#5,CR20
 	LCALL	4039H
-CR20:   JNC     BG1             ;CHECK FOR 0,1,2,3, OR 4
+CR20:   ;JNC     BG1             ;CHECK FOR 0,1,2,3, OR 4
+
+	JNC     BG3             ;SKIP BUADRATE CHECK, DUE TO COMPLICATION IN CLOCK SOURCE SELECTION
+													;FOR C8051F381. BUADRATE IS FIXED TO 115200
+
 	JNB	ACC.0,BG3	;NO RUN IF WRONG TYPE
 	MOV	DPTR,#ROMADR+16
 	MOVX	A,@DPTR		;READ THE BYTE
@@ -1167,7 +1210,7 @@ $EJECT
 PGR:	SETB	PROMV
 	AJMP	C_K
 	;
-PG1:	MOV	P2,R3		;GET THE BYTE TO PROGRAM
+PG1:	MOV	EMI0CN,R3		;GET THE BYTE TO PROGRAM
 	MOVX	A,@R1
 PG101:  LCALL   INC3210         ;BUMP POINTERS
 PG102:  MOV     R5,#1           ;SET UP INTELLIGENT COUMTER
@@ -1208,7 +1251,7 @@ ERRLK:	LJMP	ERROR		;PROCESS THE ERROR
 	;
 $EJECT
 PG7:	MOV	P0,R0		;SET UP THE PORTS
-	MOV	P2,R2		;LATCH LOW ORDER ADDRESS
+	MOV	EMI0CN,R2		;LATCH LOW ORDER ADDRESS
 	ACALL	PG11		;DELAY FOR 8748/9
 	CLR	ALED
 	MOV	P0,A		;PUT DATA ON THE PORT
@@ -1775,12 +1818,12 @@ INL2:	CJNE 	A,#CNTRLD,INL2B	;SEE IF A CONTROL D
 	;
 INL0:	ACALL	CRLF		;DO A CR
 	;
-INLINE:	MOV	P2,#HIGH IBUF	;IBUF IS IN THE ZERO PAGE
+INLINE:	MOV	EMI0CN,#HIGH IBUF	;IBUF IS IN THE ZERO PAGE
 	MOV	R0,#LOW IBUF	;POINT AT THE INPUT BUFFER
 	;
 INL1:	ACALL	INCHAR		;GET A CHARACTER
 	MOV	R5,A		;SAVE IN R5 FOR OUTPUT
-	CJNE	A,#7FH,INL2	;SEE IF A DELETE CHARACTER
+	CJNE	A,#08H,INL2	;SEE IF A DELETE CHARACTER
 	CJNE	R0,#LOW IBUF,INL6
 INL11:  MOV     R5,#BELL        ;OUTPUT A BELL
 	;
@@ -1963,8 +2006,10 @@ C_EX:	CLR	CNT_S		;NO OUTPUT STOP
 	ACALL	CRLF
         JBC     JKBIT,C_EX0
 	;
-	JNB	DIRF,SSTOP0
+	JNB	DIRF,SSTOP0X
 	AJMP	C_K		;CLEAR COB AND EXIT
+SSTOP0X:
+  LJMP    SSTOP0        
 	;
 T_CMP:	MOV	A,TVH		;COMPARE TIMER TO SP_H AND SP_L
 	MOV	R1,TVL
@@ -2148,6 +2193,7 @@ T_T1:	CJNE	A,#T_TIME,ITRAP	;SEE IF A TIME TOKEN
 	CLR	EA		;NO TIMER 0 INTERRUPTS DURING LOAD
 	MOV	TVH,R3		;SAVE THE TIME
 	MOV	TVL,R1
+	MOV	MILLIV,#0	;CLEAR ALSO MILLI VALUE PART
 	MOV	EA,C		;RESTORE INTERRUPTS
 	RET			;EXIT
 	;
@@ -2194,7 +2240,7 @@ IAT1:   JNC     T_TRAP
 ISTAX:	CJNE	A,#T_UOP+13,ISTAY	;XBYTE TOKEN
 	ACALL	SPEOP
 	;
-ISTAX1:	MOV	P2,R3
+ISTAX1:	MOV	EMI0CN,R3
 	MOVX	@R1,A
 	RET
 	;
@@ -2652,7 +2698,7 @@ SGS0:	MOV	R4,#GTYPE
 SGS1:	MOV	A,#-3		;ALLOCATE 3 BYTES ON CONTROL STACK
 	ACALL	PUSHCS
 	;
-T_X_S:	MOV	P2,#CSTKAH	;SET UP PORT FOR CONTROL STACK
+T_X_S:	MOV	EMI0CN,#CSTKAH	;SET UP PORT FOR CONTROL STACK
 	MOV	A,TXAL		;GET RETURN ADDRESS AND SAVE IT
 	MOVX	@R0,A
 	DEC	R0
@@ -2668,7 +2714,7 @@ CS1:	MOV	A,#3		;POP 3 BYTES
 	ACALL	PUSHCS
 	;
 CSETUP:	MOV	R0,CSTKA	;GET CONTROL STACK
-	MOV	P2,#CSTKAH
+	MOV	EMI0CN,#CSTKAH
 	MOVX	A,@R0		;GET BYTE
         CJNE    A,R4B0,CSETUP1  ;SEE IF TYPE MATCH
 	INC	R0
@@ -2709,7 +2755,7 @@ XXI1:   MOV     A,R2            ;SEE IF VAR'S AGREE
 	ADD	A,TEMP5		;ADD IT TO BASE OF STACK
 	MOV	R0,A		;SAVE IN R0
 	MOV	R2,#CSTKAH	;SET UP TO PUSH STEP VALUE
-	MOV	P2,R2		;SET UP PORT
+	MOV	EMI0CN,R2		;SET UP PORT
 	MOVX	A,@R0		;GET SIGN
 	INC	R0		;BACK TO EXPONENT
 	PUSH	ACC		;SAVE SIGN OF STEP
@@ -2880,7 +2926,7 @@ $EJECT
 SM:	CJNE	A,#T_CHR,SP8
 	ACALL	IGC
         CJNE    A,#'$',SM01
-	ACALL	CNX		;PUT THE CHARACTER ON THE STACK
+	LCALL	CNX		;PUT THE CHARACTER ON THE STACK
 	ACALL	IFIXL		;PUT THE CHARACTER IN R1
         SJMP    SM02
 SM01:   ACALL   ONE             ;EVALUATE THE EXPRESSION, PUT IN R3:R1
@@ -3343,7 +3389,7 @@ $EJECT
 IGC:	ACALL	GCI1		;BUMP POINTER, THEN GET CHARACTER
 	;
 GC:	SETB	RS0		;USE BANK 1
-	MOV	P2,R2		;SET UP PORT 2
+	MOV	EMI0CN,R2		;SET UP PORT 2
 	MOVX	A,@R0		;GET EXTERNAL BYTE
 	CLR	RS0		;BACK TO BANK 0
 	RET			;EXIT
@@ -3502,7 +3548,7 @@ EP22:   JB      ARGF,EP4        ;MUST BE AN OPERATOR, IF SET
 	ACALL	VAR		;IS THE VALUE A VARIABLE?
 	JNC	EP3		;PUT VARIABLE ON STACK
 	;
-	ACALL	CONST		;IS THE VALUE A NUMERIC CONSTANT?
+	LCALL	CONST		;IS THE VALUE A NUMERIC CONSTANT?
 	JNC	EP4		;IF SO, CONTINUE, IF NOT, SEE WHAT
 	CALL	GC		;GET THE CHARACTER
 	CJNE	A,#T_LPAR,EP4	;SEE IF A LEFT PAREN
@@ -3619,8 +3665,8 @@ LD_A:	; Load at expression
 	;
 	;***************************************************************
 	;
-	ACALL	ONE		;GET THE EXPRESSION
-	ACALL	X3120		;FLIP ARGS
+	LCALL	ONE		;GET THE EXPRESSION
+	LCALL	X3120		;FLIP ARGS
 	SJMP	PUSHAS
 	;
 $EJECT
@@ -3906,12 +3952,14 @@ NTWO:	DB	129
 	DB	0
 	DB	20H
 	;
-TTIME:	DB	128-4		; CLOCK CALCULATION
+;TIMER 0 COUNTER NOW SET TO .005/48/32
+;THIS VALUE WILL BE USED TO MULTIPLY XTALV TO CREATE 5MS TIME INTERVAL INTERRUPT
+TTIME:	DB	128-5		; CLOCK CALCULATION
 	DB	00H
 	DB	00H
 	DB	00H
-	DB	04H
-	DB	13H
+	DB	55H
+	DB	32H
 	;
 $EJECT
 	;***************************************************************
@@ -4093,7 +4141,7 @@ IFIX:	; Convert a floating point number to an integer, put in R3:R1
 	MOV	R3,A
 	MOV	R1,A
 	MOV	R0,ASTKA	;GET THE ARG STACK
-	MOV	P2,#ASTKAH
+	MOV	EMI0CN,#ASTKAH
 	MOVX	A,@R0		;READ EXPONENT
 	CLR	C
 	SUBB	A,#81H		;BASE EXPONENT
@@ -4132,7 +4180,7 @@ INC_ASTKA:	; Pop the ARG STACK and check for overflow
 SETREG:	CLR	A		;DON'T POP ANYTHING
 SETREG1:MOV     R0,ASTKA
 	MOV	R2,#ASTKAH
-	MOV	P2,R2
+	MOV	EMI0CN,R2
 	ADD	A,R0
 	JC	E4YY
 	MOV	ASTKA,A
@@ -4445,7 +4493,7 @@ AXBYTE: ; Read external memory
 	;***************************************************************
 	;
 	ACALL	IFIX		;GET THE EXPRESSION
-AXBYTE1:MOV     P2,R3
+AXBYTE1:MOV     EMI0CN,R3
 	MOVX	A,@R1
 	AJMP	TWO_R2
 	;
@@ -4573,7 +4621,7 @@ PLNEXP:	MOV	DPTR,#EXP1
 	;***************************************************************
 	;
 PUSHC:	ACALL	DEC_ASTKA
-	MOV	P2,R3
+	MOV	EMI0CN,R3
 	MOV	R3,#FPSIZ	;LOOP COUNTER
 	;
 PCL:	CLR	A		;SET UP A
@@ -4649,9 +4697,9 @@ C2_T2:  ACALL   SETREG          ;SET UP R2:R0
 	;
 VARCOP:	MOV	R4,#FPSIZ	;LOAD THE LOOP COUNTER
 	;
-V_C:	MOV	P2,R2		;SET UP THE PORTS
+V_C:	MOV	EMI0CN,R2		;SET UP THE PORTS
 	MOVX	A,@R0		;READ THE VALUE
-	MOV	P2,R3		;PORT TIME AGAIN
+	MOV	EMI0CN,R3		;PORT TIME AGAIN
 	MOVX	@R1,A		;SAVE IT
 	ACALL	DEC3210		;BUMP POINTERS
 	DJNZ	R4,V_C		;LOOP
@@ -4937,10 +4985,10 @@ DEC3212:DEC     R1              ;BUMP THE POINTER
 	;
 	;***************************************************************
 	;
-TBYTE:	MOV	P2,R3		;OUTPUT SOURCE REGISTER TO PORT
+TBYTE:	MOV	EMI0CN,R3		;OUTPUT SOURCE REGISTER TO PORT
 	MOVX	A,@R1		;PUT BYTE IN ACC
 	;
-TBR:	MOV	P2,R2		;OUTPUT DESTINATION TO PORT
+TBR:	MOV	EMI0CN,R2		;OUTPUT DESTINATION TO PORT
 	MOVX	@R0,A		;SAVE THE BYTE
 	RET			;EXIT
 	;
@@ -5132,16 +5180,18 @@ $EJECT
 AXTAL0:	MOV	DPTR,#XTALV	;CRYSTAL VALUE
 	ACALL	PUSHC
 	;
-AXTAL1:	ACALL	CSTAKA2		;COPY CRYSTAL VALUE TWICE
+AXTAL1:	
+;=+=    Comment out PROM and IPROM due to we will use internal FLASH instead of PROM
+;=+=    ACALL	CSTAKA2		;COPY CRYSTAL VALUE TWICE
 	ACALL	CSTAKA
-	MOV	DPTR,#PTIME	;PROM TIMER
-	ACALL	AXTAL2
-	MOV	DPTR,#PROGS
-	ACALL	S31L
-	MOV	DPTR,#IPTIME	;IPROM TIMER
-	ACALL	AXTAL2
-	MOV	DPTR,#IPROGS
-	ACALL	S31L
+;=+=	MOV	DPTR,#PTIME	;PROM TIMER
+;=+=	ACALL	AXTAL2
+;=+=	MOV	DPTR,#PROGS
+;=+=	ACALL	S31L            ;Store content of R1:R3 to @DPTR
+;=+=	MOV	DPTR,#IPTIME	;IPROM TIMER
+;=+=	ACALL	AXTAL2
+;=+=	MOV	DPTR,#IPROGS
+;=+=	ACALL	S31L            ;Store content of R1:R3 to @DPTR
 	MOV	DPTR,#TTIME	;CLOCK CALCULATION
 	ACALL	AXTAL3
 	MOV	A,R1
@@ -5462,9 +5512,9 @@ CMND5:	LJMP	ILOOP		;CHECK FOR A POSSIBLE BREAK
 XTALV:	DB	128+8		; DEFAULT CRYSTAL VALUE
 	DB	00H
 	DB	00H
-	DB	92H
-	DB	05H
-	DB	11H
+	DB	00H
+	DB	00H
+	DB	48H
 	;
 EXP11:	DB	85H
 	DB	00H
@@ -5989,7 +6039,7 @@ $EJECT
 	;
 FLOATING_SUB:
 	;
-	MOV	P2,#ARG_STACK_PAGE
+	MOV	EMI0CN,#ARG_STACK_PAGE
 	MOV	R0,ARG_STACK
 	DEC	R0		;POINT TO SIGN
 	MOVX	A,@R0		;READ SIGN
@@ -6719,7 +6769,7 @@ LOAD_POINTERS:	; Load the ARG_STACK into R0 and bump R1
 	;
 	;***************************************************************
 	;
-	MOV	P2,#ARG_STACK_PAGE
+	MOV	EMI0CN,#ARG_STACK_PAGE
 	MOV	R0,ARG_STACK
 	MOV	A,#FP_NUMBER_SIZE
 	ADD	A,R0
@@ -7358,7 +7408,7 @@ FAST_DONE:
 RSUB2:	MOV	A,#'0'		;GET THE ASCII BIAS
 	ADD	A,R6		;ADD THE COUNT
 	;
-RSUB4:	MOV	P2,R3		;SET UP P2
+RSUB4:	MOV	EMI0CN,R3		;SET UP P2
 	MOVX	@R1,A		;PLACE THE VALUE IN MEMORY
 	INC	R1
 	CJNE	R1,#00H,RSUB3	;SEE IF RAPPED AROUND
@@ -7422,8 +7472,98 @@ DC10:   JC      DC1
 DC1:    CJNE    A,#'0',DC11     ;SEE IF ASCII 0 OR GREATER
 DC11:   CPL     C
 	RET
+
+SETXRAM:; SET XRAM TO INTERNAL ONLY FOR 8051C381 
 	;
-        ;***************************************************************
+	;***************************************************************
+	;
+	MOV		EMI0CN,#0
+	MOV		EMI0CF,#3			;Internal RAM only
+	RET
+
+FRSTINIT:
+        LCALL   SETXRAM         ;SET RAM TO USE FOR THE SYSTEM
+				LCALL		INIT_DEVICE
+    		MOV  		SFRPAGE,#LEGACY_PAGE
+	RET
+; Peripheral specific initialization functions,
+; Called from the Init_Device label
+Timer_Init:
+    mov  TMOD,      #020h	
+    mov  CKCON,     #00Ah	;TIMER 0 USE SYSCLK/48
+    mov  TH1,       #030h
+    ret
+
+UART_Init:
+    mov  SCON0,     #010h
+    ret
+
+Port_IO_Init:
+    ; P0.0  -  Unassigned,  Open-Drain, Digital
+    ; P0.1  -  Unassigned,  Open-Drain, Digital
+    ; P0.2  -  Unassigned,  Open-Drain, Digital
+    ; P0.3  -  Unassigned,  Open-Drain, Digital
+    ; P0.4  -  TX0 (UART0), Open-Drain, Digital
+    ; P0.5  -  RX0 (UART0), Open-Drain, Digital
+    ; P0.6  -  Unassigned,  Open-Drain, Digital
+    ; P0.7  -  Unassigned,  Open-Drain, Digital
+
+    ; P1.0  -  Unassigned,  Open-Drain, Digital
+    ; P1.1  -  Unassigned,  Open-Drain, Digital
+    ; P1.2  -  Unassigned,  Open-Drain, Digital
+    ; P1.3  -  Unassigned,  Open-Drain, Digital
+    ; P1.4  -  Unassigned,  Open-Drain, Digital
+    ; P1.5  -  Unassigned,  Open-Drain, Digital
+    ; P1.6  -  Unassigned,  Open-Drain, Digital
+    ; P1.7  -  Unassigned,  Open-Drain, Digital
+
+    ; P2.0  -  Unassigned,  Open-Drain, Digital
+    ; P2.1  -  Unassigned,  Open-Drain, Digital
+    ; P2.2  -  Unassigned,  Open-Drain, Digital
+    ; P2.3  -  Unassigned,  Open-Drain, Digital
+    ; P2.4  -  Unassigned,  Open-Drain, Digital
+    ; P2.5  -  Unassigned,  Open-Drain, Digital
+    ; P2.6  -  Unassigned,  Open-Drain, Digital
+    ; P2.7  -  Unassigned,  Open-Drain, Digital
+
+    ; P3.0  -  Unassigned,  Open-Drain, Digital
+    ; P3.1  -  Unassigned,  Open-Drain, Digital
+    ; P3.2  -  Unassigned,  Open-Drain, Digital
+    ; P3.3  -  Unassigned,  Open-Drain, Digital
+    ; P3.4  -  Unassigned,  Open-Drain, Digital
+    ; P3.5  -  Unassigned,  Open-Drain, Digital
+    ; P3.6  -  Unassigned,  Open-Drain, Digital
+    ; P3.7  -  Unassigned,  Open-Drain, Digital
+
+		mov  P2SKIP,    #004h
+    mov  XBR0,      #001h
+    mov  XBR1,      #040h
+
+    ret
+
+Oscillator_Init:
+    mov  FLSCL,     #090h
+    mov  CLKSEL,    #003h
+    mov  OSCICN,    #0C3h
+    ret
+
+Interrupts_Init:
+    mov  IE,        #02h
+    ret
+
+; Initialization function for device,
+; Call Init_Device from your main program
+Init_Device:
+    lcall Timer_Init
+    lcall UART_Init
+    lcall Port_IO_Init
+    lcall Oscillator_Init
+    lcall Interrupts_Init
+    ret
+
+	;
+
+  ;***************************************************************
 	;
 	XSEG	;External Ram
 	;
